@@ -1,4 +1,20 @@
-# Nexus Game Compressor
+# EN Nexus Game Compressor
+
+A GUI utility for compressing game files and freeing up storage space without compromising performance.
+
+The program acts as a smart wrapper for the Windows built-in `compact.exe` utility. It utilizes the native LZX compression algorithm at the NTFS file system level. The operating system and game engine still read the files at their original size, while decompression happens on-the-fly in RAM using CPU resources.
+
+## Key Features
+
+* **Smart Steam Integration:** Automatically reads the registry, `libraryfolders.vdf`, and `appmanifest_*.acf` manifests to precisely locate currently installed games (ignoring leftover empty folders).
+* **Parallel Processing:** Bypasses the system limitation of `compact.exe` (which runs single-threaded). The utility scans files and initiates parallel compression via `ThreadPoolExecutor`, reducing processing time significantly.
+* **Drive Auto-Detection (WMI):** When a folder is selected, the program runs a hidden PowerShell query to determine the physical drive type. If an HDD is detected, multithreading is forcefully disabled to prevent hardware wear and read head "stuttering".
+* **CPU Load Control:** A user-adjustable slider to limit the number of active worker threads (based on the CPU's logical cores).
+* **Progress Resume:** Supports safe operation cancellation. If the process is interrupted, the program remembers already compressed files and resumes from where it left off upon the next launch.
+* **Smart Filter (Blacklist):** Automatically excludes files that are uncompressible by design (video, audio, archives) to save CPU resources and processing time.
+* **Anti-Cheat Safe:** Compression occurs at the file system level without interfering with game code (`.exe`, `.dll`). No bans from VAC, Vanguard, Faceit, or Easy Anti-Cheat.
+
+# RU Nexus Game Compressor
 
 Утилита с графическим интерфейсом для сжатия файлов игр и освобождения места на накопителе без ущерба для производительности. 
 
