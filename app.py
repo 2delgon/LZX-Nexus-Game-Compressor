@@ -4,6 +4,8 @@ import ctypes
 import threading
 import subprocess
 import re
+import tempfile
+import hashlib
 import customtkinter as ctk
 from tkinter import filedialog
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -14,7 +16,7 @@ class NexusCompressor(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Nexus Game Compressor")
-        self.geometry("750x700")
+        self.geometry("750x760")
         self.resizable(False, False)
         self.configure(fg_color="#121212")
         
@@ -24,6 +26,14 @@ class NexusCompressor(ctk.CTk):
         self.processed_files = 0
         self.max_cpu_threads = os.cpu_count() or 4
         self.is_scanning = False
+        self.cancel_event = threading.Event()
+        self.file_lock = threading.Lock()
+        
+        self.blacklist = {
+            '.mp4', '.avi', '.mkv', '.webm', '.bik', 
+            '.mp3', '.wav', '.ogg', '.flac', 
+            '.zip', '.rar', '.7z', '.tar', '.gz'
+        }
 
         self.build_ui()
 
@@ -84,11 +94,14 @@ class NexusCompressor(ctk.CTk):
         self.frame_stats.grid(row=3, column=0, padx=40, pady=5, sticky="ew")
         self.frame_stats.grid_columnconfigure((0, 1), weight=1)
 
-        self.lbl_original_size = ctk.CTkLabel(self.frame_stats, text="Исходный: 0.00 ГБ", font=ctk.CTkFont(size=14))
-        self.lbl_original_size.grid(row=0, column=0, sticky="w", padx=10)
+        self.lbl_total_size = ctk.CTkLabel(self.frame_stats, text="Общий объем: 0.00 МБ", font=ctk.CTkFont(size=14))
+        self.lbl_total_size.grid(row=0, column=0, sticky="w", padx=10, pady=(0, 2))
 
-        self.lbl_compressed_size = ctk.CTkLabel(self.frame_stats, text="На диске: 0.00 ГБ", font=ctk.CTkFont(size=14, weight="bold"), text_color="#00E5FF")
-        self.lbl_compressed_size.grid(row=0, column=1, sticky="e", padx=10)
+        self.lbl_compressed_size = ctk.CTkLabel(self.frame_stats, text="На диске: 0.00 МБ", font=ctk.CTkFont(size=14, weight="bold"), text_color="#00E5FF")
+        self.lbl_compressed_size.grid(row=0, column=1, sticky="e", padx=10, pady=(0, 2))
+
+        self.lbl_compressible_size = ctk.CTkLabel(self.frame_stats, text="Доступно для сжатия: 0.00 МБ", font=ctk.CTkFont(size=14), text_color="#A0A0A0")
+        self.lbl_compressible_size.grid(row=1, column=0, sticky="w", padx=10)
 
         self.progressbar = ctk.CTkProgressBar(self, width=670, height=8, progress_color="#00E5FF", fg_color="#2A2A2A")
         self.progressbar.grid(row=4, column=0, padx=40, pady=(10, 10))
@@ -99,13 +112,17 @@ class NexusCompressor(ctk.CTk):
 
         self.frame_actions = ctk.CTkFrame(self, fg_color="transparent")
         self.frame_actions.grid(row=6, column=0, padx=40, pady=15)
+        self.frame_actions.grid_columnconfigure((0, 1), weight=1)
 
-        self.btn_compress = ctk.CTkButton(self.frame_actions, text="СЖАТЬ", font=ctk.CTkFont(weight="bold", size=14), fg_color="#00E5FF", text_color="#121212", hover_color="#00B8CC", height=45, width=200, command=self.start_compression)
-        self.btn_compress.grid(row=0, column=0, padx=15)
+        self.btn_compress = ctk.CTkButton(self.frame_actions, text="СЖАТЬ", font=ctk.CTkFont(weight="bold", size=14), fg_color="#00E5FF", text_color="#121212", hover_color="#00B8CC", height=45, width=205, command=self.start_compression)
+        self.btn_compress.grid(row=0, column=0, padx=(0, 10))
 
-        self.btn_decompress = ctk.CTkButton(self.frame_actions, text="РАСПАКОВАТЬ", font=ctk.CTkFont(weight="bold", size=14), fg_color="transparent", text_color="#00E5FF", border_width=2, border_color="#00E5FF", hover_color="#1E1E1E", height=45, width=200, command=self.start_decompression)
-        self.btn_decompress.grid(row=0, column=1, padx=15)
+        self.btn_decompress = ctk.CTkButton(self.frame_actions, text="РАСПАКОВАТЬ", font=ctk.CTkFont(weight="bold", size=14), fg_color="transparent", text_color="#00E5FF", border_width=2, border_color="#00E5FF", hover_color="#1E1E1E", height=45, width=205, command=self.start_decompression)
+        self.btn_decompress.grid(row=0, column=1, padx=(10, 0))
 
+        self.btn_cancel = ctk.CTkButton(self.frame_actions, text="ОТМЕНА", font=ctk.CTkFont(weight="bold", size=14), fg_color="transparent", text_color="#C62828", border_width=2, border_color="#C62828", hover_color="#2A0A0A", height=45, width=430, command=self.cancel_operation, state="disabled")
+        self.btn_cancel.grid(row=1, column=0, columnspan=2, pady=(15, 0))
+        
     def on_slider_change(self, value):
         threads = max(1, int((value / 100) * self.max_cpu_threads))
         self.lbl_cpu.configure(text=f"Нагрузка CPU: {int(value)}% ({threads} потоков)")
@@ -133,6 +150,20 @@ class NexusCompressor(ctk.CTk):
     def safe_progress(self, value):
         self.after(0, lambda: self.progressbar.set(value))
 
+    def disable_ui_state(self):
+        self.after(0, lambda: self.btn_compress.configure(state="disabled"))
+        self.after(0, lambda: self.btn_decompress.configure(state="disabled"))
+        self.after(0, lambda: self.combo_games.configure(state="disabled"))
+        self.after(0, lambda: self.btn_browse.configure(state="disabled"))
+        self.after(0, lambda: self.btn_cancel.configure(state="normal"))
+
+    def reset_ui_state(self):
+        self.after(0, lambda: self.btn_compress.configure(state="normal"))
+        self.after(0, lambda: self.btn_decompress.configure(state="normal"))
+        self.after(0, lambda: self.btn_cancel.configure(state="disabled"))
+        self.after(0, lambda: self.combo_games.configure(state="normal"))
+        self.after(0, lambda: self.btn_browse.configure(state="normal"))
+
     def detect_drive_type(self, path):
         try:
             drive_letter = os.path.splitdrive(path)[0].replace(':', '')
@@ -156,7 +187,7 @@ class NexusCompressor(ctk.CTk):
         detected_type = self.detect_drive_type(path)
         self.after(0, lambda: self.drive_var.set(detected_type))
         self.after(0, self.on_drive_change)
-
+        
     def find_steam_games(self):
         games = {}
         try:
@@ -175,16 +206,31 @@ class NexusCompressor(ctk.CTk):
             
             for path in paths:
                 lib_path = path.replace("\\\\", "\\")
-                apps_dir = os.path.join(lib_path, "steamapps", "common")
-                if os.path.isdir(apps_dir):
-                    for game_folder in os.listdir(apps_dir):
-                        full_path = os.path.join(apps_dir, game_folder)
-                        if os.path.isdir(full_path):
-                            games[game_folder] = full_path
+                steamapps_dir = os.path.join(lib_path, "steamapps")
+                
+                if os.path.isdir(steamapps_dir):
+                    for file in os.listdir(steamapps_dir):
+                        if file.startswith("appmanifest_") and file.endswith(".acf"):
+                            manifest_path = os.path.join(steamapps_dir, file)
+                            try:
+                                with open(manifest_path, "r", encoding="utf-8") as mf:
+                                    m_content = mf.read()
+                                    name_match = re.search(r'"name"\s+"([^"]+)"', m_content)
+                                    dir_match = re.search(r'"installdir"\s+"([^"]+)"', m_content)
+                                    
+                                    if name_match and dir_match:
+                                        game_name = name_match.group(1)
+                                        install_dir = dir_match.group(1)
+                                        full_path = os.path.join(steamapps_dir, "common", install_dir)
+                                        
+                                        if os.path.isdir(full_path):
+                                            games[game_name] = full_path
+                            except Exception:
+                                continue
         except Exception:
             pass
         return games
-
+    
     def browse_folder(self):
         if self.is_scanning:
             return
@@ -207,20 +253,39 @@ class NexusCompressor(ctk.CTk):
             threading.Thread(target=self.calculate_sizes, daemon=True).start()
 
     def get_compressed_size(self, filepath):
-        high = ctypes.c_uint32()
-        low = ctypes.windll.kernel32.GetCompressedFileSizeW(str(filepath), ctypes.byref(high))
-        if low == 0xFFFFFFFF and ctypes.GetLastError() != 0:
+        abs_path = os.path.abspath(filepath)
+        if not abs_path.startswith("\\\\?\\"):
+            abs_path = "\\\\?\\" + abs_path
+            
+        try:
+            high = ctypes.c_uint32()
+            ctypes.windll.kernel32.GetCompressedFileSizeW.restype = ctypes.c_uint32
+            low = ctypes.windll.kernel32.GetCompressedFileSizeW(ctypes.c_wchar_p(abs_path), ctypes.byref(high))
+            if low == 0xFFFFFFFF and ctypes.GetLastError() != 0:
+                return os.path.getsize(filepath)
+            return (high.value << 32) + low
+        except Exception:
             return os.path.getsize(filepath)
-        return (high.value << 32) + low
 
     def get_all_files(self):
         file_list = []
-        for root, _, files in os.walk(self.selected_path):
+        for root, _, files in os.walk(self.selected_path, followlinks=True):
             for file in files:
-                file_list.append(os.path.join(root, file))
+                ext = os.path.splitext(file)[1].lower()
+                if ext not in self.blacklist:
+                    file_list.append(os.path.join(root, file))
         return file_list
 
-    def calculate_sizes(self):
+    def get_state_file(self):
+        path_hash = hashlib.md5(self.selected_path.encode('utf-8')).hexdigest()
+        return os.path.join(tempfile.gettempdir(), f"nexus_{path_hash}.txt")
+
+    def format_size(self, size_in_bytes):
+        if size_in_bytes >= (1024 ** 3):
+            return f"{size_in_bytes / (1024 ** 3):.2f} ГБ"
+        return f"{size_in_bytes / (1024 ** 2):.2f} МБ"
+
+    def calculate_sizes(self, silent=False):
         if not self.selected_path or not os.path.isdir(self.selected_path):
             return
 
@@ -230,28 +295,40 @@ class NexusCompressor(ctk.CTk):
         self.after(0, lambda: self.btn_browse.configure(state="disabled"))
         self.after(0, lambda: self.combo_games.configure(state="disabled"))
         
-        self.apply_drive_detection(self.selected_path)
-        self.safe_log("[*] Анализ файлов...")
+        if not silent:
+            self.apply_drive_detection(self.selected_path)
+            self.safe_log("[*] Анализ файлов...")
         
         total_original = 0
         total_compressed = 0
+        compressible_size = 0
         
         file_list = self.get_all_files()
         self.total_files = len(file_list)
 
         for filepath in file_list:
             try:
-                total_original += os.path.getsize(filepath)
-                total_compressed += self.get_compressed_size(filepath)
+                size = os.path.getsize(filepath)
+                comp_size = self.get_compressed_size(filepath)
+                
+                total_original += size
+                total_compressed += comp_size
+                
+                if comp_size >= size:
+                    compressible_size += size
             except Exception:
                 continue
 
-        orig_gb = total_original / (1024**3)
-        comp_gb = total_compressed / (1024**3)
+        total_str = self.format_size(total_original)
+        comp_str = self.format_size(total_compressed)
+        compressible_str = self.format_size(compressible_size)
 
-        self.after(0, lambda: self.lbl_original_size.configure(text=f"Исходный: {orig_gb:.2f} ГБ"))
-        self.after(0, lambda: self.lbl_compressed_size.configure(text=f"На диске: {comp_gb:.2f} ГБ"))
-        self.safe_log(f"[*] Найдено файлов: {self.total_files}")
+        self.after(0, lambda: self.lbl_total_size.configure(text=f"Общий объем: {total_str}"))
+        self.after(0, lambda: self.lbl_compressed_size.configure(text=f"На диске: {comp_str}"))
+        self.after(0, lambda: self.lbl_compressible_size.configure(text=f"Доступно для сжатия: {compressible_str}"))
+        
+        if not silent:
+            self.safe_log(f"[*] Найдено файлов для обработки: {self.total_files}")
         
         self.after(0, lambda: self.btn_compress.configure(state="normal"))
         self.after(0, lambda: self.btn_decompress.configure(state="normal"))
@@ -260,34 +337,52 @@ class NexusCompressor(ctk.CTk):
         self.is_scanning = False
 
     def process_single_file(self, filepath, action):
-        cmd = ['compact', '/c', '/exe:lzx', filepath] if action == "compress" else ['compact', '/u', filepath]
+        if self.cancel_event.is_set():
+            return filepath, False
+            
+        abs_path = os.path.abspath(filepath)
+            
+        cmd = ['compact', '/c', '/exe:lzx', abs_path] if action == "compress" else ['compact', '/u', abs_path]
         try:
             subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW, check=False)
-            return True
+            return filepath, True
         except Exception:
-            return False
+            return filepath, False
 
     def run_compact_multithreaded(self, action):
         if not self.selected_path:
             self.safe_log("[ОШИБКА] Директория не выбрана.")
             return
 
-        self.after(0, lambda: self.btn_compress.configure(state="disabled"))
-        self.after(0, lambda: self.btn_decompress.configure(state="disabled"))
-        self.after(0, lambda: self.combo_games.configure(state="disabled"))
-        self.after(0, lambda: self.btn_browse.configure(state="disabled"))
+        self.disable_ui_state()
+        self.cancel_event.clear()
         self.safe_progress(0)
         
         file_list = self.get_all_files()
-        self.total_files = len(file_list)
-        self.processed_files = 0
+        state_file = self.get_state_file()
+        processed_set = set()
+        
+        if os.path.exists(state_file):
+            try:
+                with open(state_file, 'r', encoding='utf-8') as f:
+                    processed_set = set(f.read().splitlines())
+                self.safe_log(f"[*] Найдено сохранение. Возобновление работы с {len(processed_set)} файла.")
+            except Exception:
+                pass
 
-        if self.total_files == 0:
-            self.safe_log("[!] Выбранная папка пуста.")
-            self.after(0, lambda: self.btn_compress.configure(state="normal"))
-            self.after(0, lambda: self.btn_decompress.configure(state="normal"))
-            self.after(0, lambda: self.combo_games.configure(state="normal"))
-            self.after(0, lambda: self.btn_browse.configure(state="normal"))
+        pending_files = [f for f in file_list if f not in processed_set]
+        self.total_files = len(file_list)
+        self.processed_files = len(processed_set)
+
+        if not pending_files:
+            self.safe_log("[!] Нет файлов для обработки или все файлы уже обработаны.")
+            if os.path.exists(state_file):
+                try:
+                    os.remove(state_file)
+                except Exception:
+                    pass
+            self.safe_progress(1.0)
+            self.reset_ui_state()
             return
 
         if self.drive_var.get() == "HDD":
@@ -299,16 +394,45 @@ class NexusCompressor(ctk.CTk):
         self.safe_log(f"[*] Начало операции. Потоков: {active_threads}. Ожидайте...")
 
         with ThreadPoolExecutor(max_workers=active_threads) as executor:
-            futures = [executor.submit(self.process_single_file, f, action) for f in file_list]
+            futures = [executor.submit(self.process_single_file, f, action) for f in pending_files]
+            
             for future in as_completed(futures):
+                if self.cancel_event.is_set():
+                    continue
+                    
+                completed_file, success = future.result()
+                if success:
+                    try:
+                        with self.file_lock:
+                            with open(state_file, 'a', encoding='utf-8') as sf:
+                                sf.write(completed_file + '\n')
+                    except Exception:
+                        pass
+
                 self.processed_files += 1
-                if self.processed_files % 50 == 0 or self.processed_files == self.total_files:
-                    progress = min(self.processed_files / self.total_files, 1.0)
+                if self.processed_files % 20 == 0 or self.processed_files == self.total_files:
+                    progress = min(self.processed_files / max(self.total_files, 1), 1.0)
                     self.safe_progress(progress)
 
-        self.safe_progress(1.0)
-        self.safe_log("[*] Операция завершена.")
-        self.calculate_sizes()
+        if os.path.exists(state_file):
+            try:
+                os.remove(state_file)
+            except Exception:
+                pass
+
+        if self.cancel_event.is_set():
+            self.safe_log("[*] Операция прервана пользователем.")
+        else:
+            self.safe_progress(1.0)
+            self.safe_log("[*] Операция завершена.")
+            
+        self.calculate_sizes(silent=True)
+        self.reset_ui_state()
+
+    def cancel_operation(self):
+        self.safe_log("[!] Запрошена отмена. Ожидание завершения текущих файлов...")
+        self.cancel_event.set()
+        self.btn_cancel.configure(state="disabled")
 
     def start_compression(self):
         if self.total_files == 0 or self.is_scanning:
