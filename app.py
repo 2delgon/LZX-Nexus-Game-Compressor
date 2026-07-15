@@ -14,6 +14,23 @@ BUF_LIMIT = 100
 BLACKLIST = {'.mp4','.avi','.mkv','.webm','.bik','.mp3','.wav','.ogg','.flac',
              '.zip','.rar','.7z','.tar','.gz','.gguf'}
 
+EXCLUDE_DIRS = {
+    'windows', 'windows.old', '$windows.~bt', '$windows.~ws',
+    'system volume information', '$recycle.bin', 'recovery', 'boot',
+    'documents and settings', 'config.msi', '$winreagent', 'perflogs',
+    'all users', 'default', 'default user',
+    'appdata', 'application data',
+    'system32', 'system', 'syswow64', 'sysnative',
+    'microsoft', 'microsoft.net', 'microsoft shared', 'microsoft sdks',
+    'msbuild', 'msocache', 'assembly',
+    'dotnet', 'dotnetcore', 'dotnetcli',
+    'microsoft visual studio', 'vssdk',
+    'reference assemblies', 'windows kits',
+    'nuget', 'packages',
+    'amd', 'ati', 'ati technologies', 'nvidia', 'nvidia corporation',
+    'nvidia gpu computing toolkit', 'intel',
+}
+
 
 class NexusCompressor(ctk.CTk):
     def __init__(self):
@@ -292,7 +309,12 @@ class NexusCompressor(ctk.CTk):
     def _files(self):
         fl = []
         try:
-            for r, _, fs in os.walk(self.selected_path):
+            parts = set(p.lower() for p in self.selected_path.split(os.sep) if p)
+            if parts & EXCLUDE_DIRS:
+                self.log(f"[!] Skipping excluded path: {self.selected_path}")
+                return []
+            for r, dirs, fs in os.walk(self.selected_path):
+                dirs[:] = [d for d in dirs if d.lower() not in EXCLUDE_DIRS]
                 for f in fs:
                     if os.path.splitext(f)[1].lower() not in BLACKLIST:
                         fl.append(os.path.join(r, f))
@@ -324,7 +346,6 @@ class NexusCompressor(ctk.CTk):
                 self._ui(b.configure, state="disabled")
             if not silent:
                 self._ui(self.drive_var.set, self.detect_drive(self.selected_path))
-                self._ui(self.apply_drive_mode)
                 self.log("[*] Analysis in progress...")
             orig = comp = 0
             fl = self._files()
@@ -353,11 +374,16 @@ class NexusCompressor(ctk.CTk):
             self.scan_lock.release()
 
     def _is_compressed(self, fp):
-        cs = self._comp_size(fp)
-        s = os.path.getsize(fp)
-        return cs < s
+        try:
+            cs = self._comp_size(fp)
+            s = os.path.getsize(fp)
+            return cs < s
+        except Exception:
+            return False
 
     def _process(self, fp, action):
+        parts = fp.split(os.sep)
+        short = os.sep.join(parts[-3:]) if len(parts) >= 3 else fp
         try:
             if action == "compress":
                 if self._is_compressed(fp):
@@ -377,22 +403,22 @@ class NexusCompressor(ctk.CTk):
 
             if not ok:
                 out = (r.stdout + r.stderr).decode('utf-8', errors='replace').strip()
-                self.log(f"  [!] {os.path.basename(fp)} (exit={r.returncode}): {out[:200]}")
+                self.log(f"  [!] ...{short} (exit={r.returncode})")
             else:
                 if action == "decompress":
                     if self._is_compressed(fp):
-                        self.log(f"  [WARN] {os.path.basename(fp)} — still compressed")
+                        self.log(f"  [WARN] ...{short} — still compressed")
                     else:
-                        self.log(f"  [*] {os.path.basename(fp)} (decompressed)")
+                        self.log(f"  [*] ...{short} (decompressed)")
                 else:
                     if not self._is_compressed(fp):
-                        self.log(f"  [WARN] {os.path.basename(fp)} — not compressed")
+                        self.log(f"  [WARN] ...{short} — not compressed")
                     else:
-                        self.log(f"  [*] {os.path.basename(fp)} (compressed)")
+                        self.log(f"  [*] ...{short} (compressed)")
 
             return fp, ok, "ok"
         except Exception as e:
-            self.log(f"  [ERROR] {os.path.basename(fp)}: {e}")
+            self.log(f"  [ERROR] ...{short}: {e}")
             return fp, False, "ok"
 
     def _flush(self, buf, sf):
@@ -513,4 +539,6 @@ class NexusCompressor(ctk.CTk):
 
 
 if __name__ == "__main__":
-    NexusCompressor().mainloop()
+    app = NexusCompressor()
+    app.log(f"[*] EXCLUDE_DIRS loaded: {', '.join(sorted(EXCLUDE_DIRS))}")
+    app.mainloop()
